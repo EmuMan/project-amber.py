@@ -1,8 +1,9 @@
 from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
 from projectamber.http import APIRequest
-from projectamber.utils import _autogen_repr, _talent_format
+from projectamber.utils import _autogen_repr, _talent_format, find_any
 
 
 class APIClient:
@@ -12,6 +13,7 @@ class APIClient:
     def __init__(self) -> None:
         self.curves = {}
     
+    @cache
     def get_characters(self) -> list['Character']:
         request = APIRequest('GET', 'en', '/avatar')
         data = request.request()
@@ -35,7 +37,16 @@ class APIClient:
             ))
         
         return avatars
-
+    
+    def get_character(self, *, id: int = None, name: str = None) -> 'Character':
+        if id is not None:
+            return find_any(self.get_characters(), lambda c: c.id == id)
+    
+        if name is not None:
+            return find_any(self.get_characters(), lambda c: name.lower() in c.name.lower())
+        
+        raise TypeError('get_character() requires at least one argument: \'id\' or \'name\'')
+        
     def get_curve(self, curve_id: str) -> 'Curve':
         if len(self.curves) == 0:
             self._load_curves()
@@ -160,7 +171,7 @@ class CharacterTalent:
         return cls(
             _type=_type,
             name=data['name'],
-            description=data['description'],
+            description=data['description'].replace('\\n', '\n'),
             icon=data['icon'],
             promotions=None if _type == 2 else \
                 {promo_index: TalentPromotionStep._from_data(promo_entry) \
@@ -238,13 +249,35 @@ class Character:
     lazy: bool
     
     # require load
-    info: CharacterInfo | None
-    ascensions: list[CharacterAscensionStep] | None
-    level_stats: dict[str, CurvedValue] | None
-    talents: list[CharacterTalent] | None
-    constellations: list[CharacterConstellation] | None
+    info: CharacterInfo
+    ascensions: list[CharacterAscensionStep]
+    level_stats: dict[str, CurvedValue]
+    talents: dict[str, CharacterTalent]
+    constellations: list[CharacterConstellation]
     name_card: CharacterNameCard | None
     special_food = CharacterSpecialFood | None
+    
+    @property
+    def talent_normal(self) -> CharacterTalent:
+        return find_any(self.talents.values(), lambda t: t.icon.startswith('Skill_A'))
+    
+    @property
+    def talent_skill(self) -> CharacterTalent:
+        return find_any(self.talents.values(), lambda t: \
+            t.icon.startswith('Skill_S') and t.icon.endswith('01'))
+    
+    @property
+    def talent_alternate_dash(self) -> CharacterTalent | None:
+        return find_any(self.talents.values(), lambda t: \
+            t.icon.startswith('Skill_S') and t.icon.endswith('02'))
+    
+    @property
+    def talent_burst(self) -> CharacterTalent:
+        return find_any(self.talents.values(), lambda t: t._type == 1)
+    
+    @property
+    def talent_passives(self) -> list[CharacterTalent]:
+        return [talent for talent in self.talents.values() if talent._type == 2]
     
     def __init__(self, client: APIClient, id: str, rank: int, name: str, element: str, weapon_type: str,
                  icon: str, birthday: tuple[int, int], release: int | None, _route: str) -> None:
@@ -286,17 +319,21 @@ class Character:
             curve = self.client.get_curve(stat['type'])
             self.level_stats[stat['propType']] = CurvedValue(stat['initValue'], curve)
         
-        self.talents = [None] * 7
+        self.talents = {}
         for talent_index, talent_info in data['talent'].items():
-            self.talents[int(talent_index)] = CharacterTalent._from_data(talent_info)
+            self.talents[talent_index] = CharacterTalent._from_data(talent_info)
         
         self.constellations = [None] * 6
         for con_index, con_info in data['constellation'].items():
             self.constellations[int(con_index)] = CharacterConstellation._from_data(con_info)
-            
-        self.name_card = CharacterNameCard._from_data(data['other']['nameCard'])
         
-        self.special_food = CharacterSpecialFood._from_data(data['other']['specialFood'])
+        if data['other'] is None:
+            self.name_card = self.special_food = None
+        else:
+            self.name_card = CharacterNameCard._from_data(data['other']['nameCard']) # traveller
+            
+            self.special_food = None if data['other']['specialFood'] is None else \
+                CharacterSpecialFood._from_data(data['other']['specialFood']) # raiden kekw
     
     def get_base_stat(self, stat_id: str, level: int, ascension: int) -> float:
         return self.level_stats[stat_id].get_value(level) + \
