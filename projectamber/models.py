@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from projectamber.http import APIRequest
-from projectamber.utils import _autogen_repr
+from projectamber.utils import _autogen_repr, _talent_format
 
 
 class APIClient:
@@ -128,10 +128,19 @@ class TalentPromotionStep:
     _description_format: list[str]
     parameters: list[float]
     
-    # TODO: implement formatting
     @property
     def description(self) -> list[str]:
-        return []
+        return [_talent_format(line, self.parameters) for line in self._description_format if line != '']
+    
+    @classmethod
+    def _from_data(cls, data: dict) -> 'TalentPromotionStep':
+        return cls(
+            level=data['level'],
+            item_cost=data['costItems'] or {},
+            coin_cost=data['coinCost'] or {},
+            _description_format=data['description'],
+            parameters=data['params']
+        )
 
 @dataclass
 class CharacterTalent:
@@ -140,16 +149,84 @@ class CharacterTalent:
     name: str
     description: str
     icon: str
-    levels: list[TalentPromotionStep]
-    cooldown: float
-    energy_cost: float
+    promotions: dict[str, TalentPromotionStep] | None
+    cooldown: int | None
+    energy_cost: int | None
+    
+    @classmethod
+    def _from_data(cls, data: dict) -> 'CharacterTalent':
+        _type: int = data['type']
+        
+        return cls(
+            _type=_type,
+            name=data['name'],
+            description=data['description'],
+            icon=data['icon'],
+            promotions=None if _type == 2 else \
+                {promo_index: TalentPromotionStep._from_data(promo_entry) \
+                    for promo_index, promo_entry in data['promote'].items()},
+            cooldown=None if _type == 2 else data['cooldown'],
+            energy_cost=None if _type == 2 else data['cost'],
+        )
+
+@dataclass
+class CharacterConstellation:
+    
+    name: str
+    description: str
+    icon: str
+    
+    @classmethod
+    def _from_data(cls, data: dict) -> 'CharacterConstellation':
+        return cls(
+            name=data['name'],
+            description=data['description'],
+            icon=data['icon'],
+        )
+        
+@dataclass
+class CharacterNameCard:
+    
+    id: int
+    name: str
+    description: str
+    icon: str
+    
+    @classmethod
+    def _from_data(cls, data: dict) -> 'CharacterNameCard':
+        return cls(
+            id=data['id'],
+            name=data['name'],
+            description=data['description'],
+            icon=data['icon'],
+        )
+
+
+@dataclass
+class CharacterSpecialFood:
+    
+    id: int
+    name: str
+    rank: int
+    effect_icon: str
+    icon: str
+    
+    @classmethod
+    def _from_data(cls, data: dict) -> 'CharacterSpecialFood':
+        return cls(
+            id=data['id'],
+            name=data['name'],
+            rank=data['rank'],
+            effect_icon=data['effectIcon'],
+            icon=data['icon'],
+        )
 
 class Character:
     
     # always present
     client: APIClient
     id: str
-    rarity: int
+    rank: int
     name: str
     element: str
     weapon_type: str
@@ -164,12 +241,16 @@ class Character:
     info: CharacterInfo | None
     ascensions: list[CharacterAscensionStep] | None
     level_stats: dict[str, CurvedValue] | None
+    talents: list[CharacterTalent] | None
+    constellations: list[CharacterConstellation] | None
+    name_card: CharacterNameCard | None
+    special_food = CharacterSpecialFood | None
     
     def __init__(self, client: APIClient, id: str, rank: int, name: str, element: str, weapon_type: str,
                  icon: str, birthday: tuple[int, int], release: int | None, _route: str) -> None:
         self.client = client
         self.id = id
-        self.rarity = rank
+        self.rank = rank
         self.name = name
         self.element = element
         self.weapon_type = weapon_type
@@ -195,13 +276,27 @@ class Character:
     
     def _load_data(self, data: dict):
         self.info = CharacterInfo._from_data(data['fetter'])
+        
         self.ascensions = []
         for i, step in enumerate(data['upgrade']['promote']):
             self.ascensions.append(CharacterAscensionStep._from_data(i == 0, step))
+            
         self.level_stats = {}
         for stat in data['upgrade']['prop']:
             curve = self.client.get_curve(stat['type'])
             self.level_stats[stat['propType']] = CurvedValue(stat['initValue'], curve)
+        
+        self.talents = [None] * 7
+        for talent_index, talent_info in data['talent'].items():
+            self.talents[int(talent_index)] = CharacterTalent._from_data(talent_info)
+        
+        self.constellations = [None] * 6
+        for con_index, con_info in data['constellation'].items():
+            self.constellations[int(con_index)] = CharacterConstellation._from_data(con_info)
+            
+        self.name_card = CharacterNameCard._from_data(data['other']['nameCard'])
+        
+        self.special_food = CharacterSpecialFood._from_data(data['other']['specialFood'])
     
     def get_base_stat(self, stat_id: str, level: int, ascension: int) -> float:
         return self.level_stats[stat_id].get_value(level) + \
