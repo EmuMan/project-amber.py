@@ -38,7 +38,7 @@ class APIClient:
         
         return avatars
     
-    def get_character(self, *, id: int = None, name: str = None) -> 'Character':
+    def get_character(self, *, id: str = None, name: str = None) -> 'Character':
         if id is not None:
             return find_any(self.get_characters(), lambda c: c.id == id)
     
@@ -46,6 +46,38 @@ class APIClient:
             return find_any(self.get_characters(), lambda c: name.lower() in c.name.lower())
         
         raise TypeError('get_character() requires at least one argument: \'id\' or \'name\'')
+    
+    @cache
+    def get_weapons(self) -> list['Weapon']:
+        request = APIRequest('GET', 'en', '/weapon')
+        data = request.request()
+        
+        weapon_types: dict[str, str] = data['types']
+        weapons_raw: dict[str, dict[str, Any]] = data['items']
+        
+        weapons: list[Character] = []
+        
+        for id, info in weapons_raw.items():
+            weapons.append(Weapon(
+                client=self,
+                id=id,
+                rank=info['rank'],
+                type=weapon_types[info['type']],
+                name=info['name'],
+                icon=info['icon'],
+                _route=info['route']
+            ))
+        
+        return weapons
+
+    def get_weapon(self, *, id: int = None, name: str = None) -> 'Weapon':
+        if id is not None:
+            return find_any(self.get_weapons(), lambda w: w.id == id)
+    
+        if name is not None:
+            return find_any(self.get_weapons(), lambda w: name.lower() in w.name.lower())
+        
+        raise TypeError('get_weapon() requires at least one argument: \'id\' or \'name\'')
         
     def get_curve(self, curve_id: str) -> 'Curve':
         if len(self.curves) == 0:
@@ -53,7 +85,7 @@ class APIClient:
         return self.curves[curve_id]
     
     def _load_curves(self) -> None:
-        endpoints = ('/avatarCurve',)
+        endpoints = ('/avatarCurve', '/weaponCurve')
         for endpoint in endpoints:
             request = APIRequest('GET', 'static', endpoint)
             data = request.request()
@@ -351,3 +383,111 @@ class Character:
     def get_extra_stats(self, ascension: int) -> list[tuple[str, int]]:
         return [(name, value) for name, value in self.ascensions[ascension].stats.items() \
             if not name.startswith('FIGHT_PROP_BASE_')]
+        
+
+@dataclass
+class WeaponAffix:
+    
+    id: int
+    name: str
+    descriptions: list[str]
+    
+    @classmethod
+    def _from_data(cls, id: str, data: dict) -> 'WeaponAffix':
+        descriptions = [None] * 5
+        for index, description in data['upgrade'].items():
+            descriptions[int(index)] = description
+        return cls(
+            id=int(id),
+            name=data['name'],
+            descriptions=descriptions,
+        )
+
+@dataclass
+class WeaponAscensionStep:
+    
+    first: bool
+    step_index: int
+    item_cost: dict[str, int] # TODO: Will become Material dict, or potentially new structure
+    coin_cost: int
+    stats: dict[str, float]
+    max_level: int
+    required_adventure_rank: int
+    
+    @classmethod
+    def _from_data(cls, first: bool, data: dict) -> 'WeaponAscensionStep':
+        return CharacterAscensionStep(
+            first=first,
+            step_index=data['promoteLevel'],
+            item_cost=data.get('costItems', {}),
+            coin_cost=data.get('coinCost', 0),
+            stats=data.get('addProps', {}),
+            max_level=data['unlockMaxLevel'],
+            required_adventure_rank=data.get('requiredPlayerLevel', 0),
+        )
+
+class Weapon:
+    
+    # always present
+    client: APIClient
+    id: int
+    rank: int
+    type: str
+    name: str
+    icon: str
+    _route: str
+    
+    # require load
+    description: str
+    story_id: int
+    affix: dict[str, WeaponAffix]
+    refinement_costs: list[int]
+    level_stats: dict[str, CurvedValue]
+    ascensions: list[WeaponAscensionStep]
+    
+    lazy: bool
+    
+    def __init__(self, client: APIClient, id: int, rank: int, type: str, name: str, icon: str, _route: str):
+        self.client = client
+        self.id = id
+        self.rank = rank
+        self.type = type
+        self.name = name
+        self.icon = icon
+        self._route = _route
+
+    def fetch(self) -> 'Weapon':
+        request = APIRequest('GET', 'en', f'/weapon/{self.id}')
+        data = request.request()
+        self._load_data(data)
+        self.lazy = False
+        return self
+    
+    def _load_data(self, data: dict):
+        self.description = data['description']
+        self.story_id = data['storyId']
+        
+        self.affix = {affix_id: WeaponAffix._from_data(affix_id, affix_data) \
+            for affix_id, affix_data in data['affix'].items()}
+        
+        self.refinement_costs = data['upgrade']['awakenCost']
+        
+        self.level_stats = {}
+        for stat in data['upgrade']['prop']:
+            curve = self.client.get_curve(stat['type'])
+            self.level_stats[stat['propType']] = CurvedValue(stat['initValue'], curve)
+        
+        self.ascensions = []
+        for i, step in enumerate(data['upgrade']['promote']):
+            self.ascensions.append(WeaponAscensionStep._from_data(i == 0, step))
+
+    def get_base_attack(self, level: int, ascension: int) -> float:
+        return self.level_stats['FIGHT_PROP_BASE_ATTACK'].get_value(level) + \
+            self.ascensions[ascension].stats['FIGHT_PROP_BASE_ATTACK']
+    
+    def get_substat(self, level: int, ascension: int) -> tuple[str, CurvedValue] | None:
+        for stat_name, stat_curve in self.level_stats.items():
+            if not stat_name.startswith('FIGHT_PROP_BASE_'):
+                return (stat_name, stat_curve.get_value(level) + \
+                    self.ascensions[ascension].stats.get(stat_name, 0.0))
+        return None
