@@ -467,13 +467,15 @@ class Weapon:
         self.description = data['description']
         self.story_id = data['storyId']
         
-        self.affix = {affix_id: WeaponAffix._from_data(affix_id, affix_data) \
+        self.affix = {} if data['affix'] is None else \
+            {affix_id: WeaponAffix._from_data(affix_id, affix_data) \
             for affix_id, affix_data in data['affix'].items()}
         
         self.refinement_costs = data['upgrade']['awakenCost']
         
         self.level_stats = {}
         for stat in data['upgrade']['prop']:
+            if 'propType' not in stat: continue
             curve = self.client.get_curve(stat['type'])
             self.level_stats[stat['propType']] = CurvedValue(stat['initValue'], curve)
         
@@ -485,9 +487,9 @@ class Weapon:
         return self.level_stats['FIGHT_PROP_BASE_ATTACK'].get_value(level) + \
             self.ascensions[ascension].stats['FIGHT_PROP_BASE_ATTACK']
     
-    def get_substat(self, level: int, ascension: int) -> tuple[str, CurvedValue] | None:
+    def get_substat(self, level: int, ascension: int) -> tuple[str, CurvedValue] | tuple[None, None]:
         for stat_name, stat_curve in self.level_stats.items():
             if not stat_name.startswith('FIGHT_PROP_BASE_'):
                 return (stat_name, stat_curve.get_value(level) + \
                     self.ascensions[ascension].stats.get(stat_name, 0.0))
-        return None
+        return (None, None)
